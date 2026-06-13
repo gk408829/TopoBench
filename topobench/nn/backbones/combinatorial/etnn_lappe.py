@@ -380,6 +380,14 @@ class _ETNNLapPELayer(nn.Module):
 
         out = {}
         for rank, features in x.items():
+            # Defensive fallback: if a future config exposes a rank that is
+            # never touched by any configured relation, keep that rank's
+            # features unchanged rather than failing at lookup time. The
+            # standard ETNN-LapPE config touches ranks 0, 1, and 2.
+            if str(rank) not in self.update:
+                out[rank] = features
+                continue
+
             # Concatenate the current rank state with all messages arriving at
             # that rank, then apply the rank-specific residual update.
             update_input = torch.cat(
@@ -469,9 +477,10 @@ def _build_lappe_cell_coordinates(
                 f"`{incidence_key}` is missing."
             )
 
-        # Lift coordinates one rank at a time: vertices -> edges -> faces.
-        # This avoids adding a new preprocessing contract for direct vertex-cell
-        # incidence while still producing a coordinate for every visible cell.
+        # Lift coordinates one rank at a time: rank 0 -> rank 1 -> rank 2.
+        # This recursive incidence averaging avoids adding a new preprocessing
+        # contract for direct vertex-to-cell incidence while still producing a
+        # coordinate for every visible cell.
         incidence = getattr(batch, incidence_key).coalesce().to(device)
         coordinates[rank] = _average_coordinates_through_incidence(
             lower_coordinates=coordinates[rank - 1],

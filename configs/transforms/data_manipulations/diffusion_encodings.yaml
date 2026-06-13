@@ -1,0 +1,7 @@
+transform_name: "DiffusionPE"
+transform_type: "data manipulation"
+max_pe_dim: 3
+diffusion_time: 1.0
+include_first: false
+concat_to_x: false
+method: exact

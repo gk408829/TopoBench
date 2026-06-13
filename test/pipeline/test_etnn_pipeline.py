@@ -93,6 +93,44 @@ class TestETNNPipeline:
             cfg.model.backbone.neighborhoods
         )
 
+    def test_etnn_diffusion_config_composes_with_diffusion_before_lifting(
+        self,
+    ):
+        """Diffusion ETNN config should compute coordinates before lifting."""
+        with hydra.initialize(version_base="1.3", config_path="../../configs"):
+            cfg = hydra.compose(
+                config_name="run.yaml",
+                overrides=[
+                    "model=combinatorial/etnn_diffusion",
+                    "dataset=graph/MUTAG",
+                ],
+                return_hydra_config=False,
+            )
+
+        assert cfg.model.model_name == "etnn_diffusion"
+        assert (
+            cfg.model.backbone._target_
+            == "topobench.nn.backbones.combinatorial.etnn_structural.ETNNStructuralCoordinates"
+        )
+        assert cfg.model.backbone.coordinate_attr == "DiffusionPE"
+
+        # The model-specific transform default should compute heat-kernel
+        # diffusion coordinates before graph-to-combinatorial lifting.
+        assert "diffusion_coordinates" in cfg.transforms
+        diffusion = cfg.transforms.diffusion_coordinates
+        assert diffusion.transform_name == "DiffusionPE"
+        assert diffusion.concat_to_x is False
+        assert diffusion.max_pe_dim == 3
+        assert diffusion.diffusion_time == 1.0
+
+        # The lifting remains the same as the baseline ETNN and LapPE variants.
+        assert "graph2combinatorial_lifting" in cfg.transforms
+        lifting = cfg.transforms.graph2combinatorial_lifting
+        assert lifting.transform_name == "GraphTriangleInducedCC"
+        assert list(lifting.neighborhoods) == list(
+            cfg.model.backbone.neighborhoods
+        )
+
     @pytest.mark.skip(
         reason=(
             "One-epoch ETNN pipeline run may download/process MUTAG. "
