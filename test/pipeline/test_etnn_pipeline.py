@@ -1,4 +1,4 @@
-"""Pipeline smoke checks for the combinatorial ETNN config.
+"""Pipeline smoke checks for the combinatorial ETNN configs.
 
 The fast test composes Hydra config only. The actual one-epoch training smoke
 test is kept in this file but skipped by default because it may download and
@@ -15,7 +15,7 @@ from test._utils.simplified_pipeline import run
 
 
 class TestETNNPipeline:
-    """End-to-end checks for ``model=combinatorial/etnn``."""
+    """End-to-end config checks for ETNN and structural-coordinate variants."""
 
     def setup_method(self):
         """Reset Hydra between tests so overrides stay isolated."""
@@ -86,6 +86,44 @@ class TestETNNPipeline:
 
         # The required graph-to-combinatorial lifting should still be present
         # and should use the neighborhoods consumed by the ETNN backbone.
+        assert "graph2combinatorial_lifting" in cfg.transforms
+        lifting = cfg.transforms.graph2combinatorial_lifting
+        assert lifting.transform_name == "GraphTriangleInducedCC"
+        assert list(lifting.neighborhoods) == list(
+            cfg.model.backbone.neighborhoods
+        )
+
+    def test_etnn_lappe_rbf_config_composes_with_lappe_before_lifting(self):
+        """LapPE-RBF ETNN config should reuse LapPE coordinate preprocessing."""
+        with hydra.initialize(version_base="1.3", config_path="../../configs"):
+            cfg = hydra.compose(
+                config_name="run.yaml",
+                overrides=[
+                    "model=combinatorial/etnn_lappe_rbf",
+                    "dataset=graph/MUTAG",
+                ],
+                return_hydra_config=False,
+            )
+
+        assert cfg.model.model_name == "etnn_lappe_rbf"
+        assert (
+            cfg.model.backbone._target_
+            == "topobench.nn.backbones.combinatorial.etnn_lappe.ETNNLapPE"
+        )
+        assert cfg.model.backbone.coordinate_attr == "LapPE"
+        assert cfg.model.backbone.distance_encoding == "rbf"
+        assert cfg.model.backbone.include_raw_distance is True
+        assert cfg.model.backbone.num_rbf == 8
+        assert cfg.model.backbone.rbf_max == 2.0
+
+        # The RBF variant should isolate the distance-encoding change while
+        # keeping the same structural-coordinate preprocessing as ETNN-LapPE.
+        assert "lappe_coordinates" in cfg.transforms
+        lappe = cfg.transforms.lappe_coordinates
+        assert lappe.transform_name == "LapPE"
+        assert lappe.concat_to_x is False
+        assert lappe.max_pe_dim == 3
+
         assert "graph2combinatorial_lifting" in cfg.transforms
         lifting = cfg.transforms.graph2combinatorial_lifting
         assert lifting.transform_name == "GraphTriangleInducedCC"

@@ -1,28 +1,57 @@
 """LapPE structural-coordinate ETNN backbone for combinatorial complexes.
 
-This module provides a coordinate-enabled ETNN variant while keeping the
-coordinate-free ETNN implementation in ``etnn.py`` unchanged. It is intended
-for graph datasets, such as GraphUniverse, that do not provide physical
-Euclidean coordinates but can support deterministic structural
-pseudo-coordinates.
+This module implements a coordinate-enabled TopoBench adaptation of
+E(n)-Equivariant Topological Neural Networks (ETNNs) from Battiloro et al.,
+``E(n) Equivariant Topological Neural Networks``, arXiv:2405.15429, and the
+official implementation at
+``https://github.com/NSAPH-Projects/topological-equivariant-networks``.
+
+The coordinate-free backbone in ``etnn.py`` implements the ETNN/CCMPN feature
+update over TopoBench neighborhoods. This file keeps that feature update but
+adds structural pseudo-coordinates for graph datasets, such as GraphUniverse,
+that do not provide physical Euclidean coordinates.
 
 The construction is deliberately conservative:
 
-1. TopoBench computes normalized graph Laplacian eigenvectors as rank-0
-   structural coordinates with the existing ``LapPE`` transform.
-2. Higher-rank cell coordinates are obtained by incidence averaging:
+1. A preprocessing transform computes normalized graph Laplacian eigenvectors
+   as rank-0 structural coordinates:
 
-       p_0 = LapPE
-       p_r = mean_{d incident to c} p_{r-1,d}
+       p_0(v) = LapPE(v)
 
-3. ETNN relation messages receive the original sparse-neighborhood scalar and
-   one E(n)-invariant structural distance:
+2. Higher-rank cell coordinates are obtained recursively by incidence
+   averaging:
+
+       p_r(c) = mean_{d incident to c} p_{r-1}(d)
+
+   In TopoBench combinatorial complexes, ``incidence_r`` has rank ``r-1`` cells
+   on rows and rank ``r`` cells on columns. Absolute incidence values are used
+   because orientation signs are not part of the coordinate barycenter.
+
+3. The ETNN relation message receives the original sparse-neighborhood scalar
+   and a rigid-motion invariant structural distance encoding. By default this
+   encoding is the scalar squared distance:
 
        z_{d,c,N} = concat(h_d, h_c, a_{d,c,N}, ||p_d - p_c||^2)
 
-The coordinate update from the full ETNN formulation is still omitted. These
-coordinates should be read as structural embeddings of the graph, not as
-physical Euclidean coordinates.
+   The optional ``distance_encoding="rbf"`` mode replaces this single channel
+   with a Euclidean-distance RBF expansion:
+
+       d_{d,c} = sqrt(||p_d - p_c||^2 + eps)
+       e_k     = exp(-gamma * (d_{d,c} - mu_k)^2)
+       z       = concat(h_d, h_c, a_{d,c,N}, [d_{d,c}], e_1, ..., e_K)
+
+   The feature update is therefore:
+
+       m_{c,N} = sum_{d in N(c)} psi_N(z_{d,c,N})
+       h'_c    = h_c + beta_rank(c)(h_c, concat_N m_{c,N})
+
+This follows the CCMPN/ETNN neighborhood aggregation and feature-update
+structure while specializing the geometric invariant input to distances in a
+structural graph embedding. The coordinate update from ETNN is omitted:
+coordinates are fixed auxiliary features, not learned dynamical states. Thus
+the model is invariant to rigid transformations of the structural coordinate
+frame, but the coordinates should be interpreted as graph-derived structural
+embeddings rather than physical Euclidean positions.
 """
 
 from __future__ import annotations
@@ -47,17 +76,26 @@ class ETNNLapPE(nn.Module):
     rank-0 coordinate attribute, usually ``LapPE``, produced before
     graph-to-combinatorial lifting. For each relation edge from sender cell
     ``d`` to receiver cell ``c``, the relation-specific message function sees
-    both the sparse TopoBench relation value ``a_{d,c,N}`` and the invariant
-    scalar ``||p_d - p_c||^2``.
+    the sparse TopoBench relation value ``a_{d,c,N}`` together with an
+    E(n)-invariant structural-distance encoding derived from
+    ``||p_d - p_c||``.
+
+    By default, this encoding is the scalar squared distance. Optionally, the
+    distance can be expanded with radial basis functions, which keeps the
+    geometric input invariant while giving the message MLP a richer distance
+    representation.
 
     This variant keeps ETNN's topological feature update structure:
 
-        m_{c,N} = sum_{d in N(c)} psi_N(h_d, h_c, a_{d,c,N}, ||p_d-p_c||^2)
+        m_{c,N} = sum_{d in N(c)} psi_N(h_d, h_c, a_{d,c,N}, enc(||p_d-p_c||))
         h'_c    = h_c + beta_rank(c)(h_c, concat_N m_{c,N})
 
-    The LapPE term is used only as an invariant message feature. Coordinates
-    are not updated, so this module should be understood as a structural
-    coordinate adaptation rather than a full coordinate-dynamical ETNN.
+    Here ``enc`` is either the default squared distance or an RBF expansion of
+    Euclidean distance. These equations follow the ETNN feature-update and
+    neighborhood-aggregation structure. The LapPE term is used only as an
+    invariant message feature. Coordinates are not updated, so this module
+    should be understood as a structural-coordinate adaptation rather than a
+    full coordinate-dynamical ETNN.
 
     The backbone expects the lifting/feature-encoding pipeline to provide
     feature tensors for every rank from 0 to ``max_rank``. Empty ranks should
@@ -85,6 +123,25 @@ class ETNNLapPE(nn.Module):
         Whether to use batch normalization inside MLP blocks.
     coordinate_attr : str, optional
         Batch attribute containing rank-0 structural coordinates.
+    distance_encoding : {"scalar", "rbf"}, optional
+        Structural distance encoding appended to each relation message. The
+        default ``"scalar"`` preserves the original LapPE variant and appends
+        ``||p_d - p_c||^2``. The ``"rbf"`` option appends Euclidean distance
+        and a fixed radial-basis expansion of that distance.
+    include_raw_distance : bool, optional
+        Whether ``"rbf"`` mode includes the raw Euclidean distance before the
+        RBF channels.
+    num_rbf : int, optional
+        Number of RBF centers used when ``distance_encoding="rbf"``.
+    rbf_min : float, optional
+        Minimum Euclidean distance center for RBF encoding.
+    rbf_max : float, optional
+        Maximum Euclidean distance center for RBF encoding.
+    rbf_gamma : float | None, optional
+        RBF width parameter. If ``None``, the value is derived from center
+        spacing as ``1 / spacing^2``.
+    distance_eps : float, optional
+        Numerical epsilon used before the square root in RBF mode.
     """
 
     def __init__(
@@ -98,6 +155,13 @@ class ETNNLapPE(nn.Module):
         activation: str = "silu",
         use_batch_norm: bool = False,
         coordinate_attr: str = "LapPE",
+        distance_encoding: str = "scalar",
+        include_raw_distance: bool = True,
+        num_rbf: int = 8,
+        rbf_min: float = 0.0,
+        rbf_max: float = 2.0,
+        rbf_gamma: float | None = None,
+        distance_eps: float = 1e-8,
     ) -> None:
         super().__init__()
         if num_layers < 1:
@@ -111,6 +175,15 @@ class ETNNLapPE(nn.Module):
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
         self.coordinate_attr = coordinate_attr
+        self.distance_encoder = _LapPEDistanceEncoder(
+            distance_encoding=distance_encoding,
+            include_raw_distance=include_raw_distance,
+            num_rbf=num_rbf,
+            rbf_min=rbf_min,
+            rbf_max=rbf_max,
+            rbf_gamma=rbf_gamma,
+            distance_eps=distance_eps,
+        )
 
         # Keep the public neighborhood config identical to ETNN, then derive
         # source/destination ranks for relation-wise message passing.
@@ -128,8 +201,11 @@ class ETNNLapPE(nn.Module):
             }
         )
 
-        # LapPE layers use the same topological relations as ETNN, with one
-        # additional scalar structural-distance feature per relation edge.
+        # LapPE layers use the same topological relations as ETNN, then append
+        # the configured structural-distance encoding per relation edge. Scalar
+        # mode preserves the original LapPE variant; RBF mode gives the message
+        # MLP a richer invariant distance basis without exposing raw
+        # coordinate-frame-dependent vectors.
         self.layers = nn.ModuleList(
             [
                 _ETNNLapPELayer(
@@ -139,6 +215,7 @@ class ETNNLapPE(nn.Module):
                     dropout=dropout,
                     activation=activation,
                     use_batch_norm=use_batch_norm,
+                    distance_encoder=self.distance_encoder,
                 )
                 for _ in range(num_layers)
             ]
@@ -220,9 +297,10 @@ class _ETNNLapPELayer(nn.Module):
 
     The only architectural difference is the relation edge attribute. Instead
     of using only the sparse neighborhood value ``a_{d,c,N}``, each message
-    also sees ``||p_d - p_c||^2`` computed from LapPE-derived cell
-    coordinates. This keeps the geometric signal invariant to translations,
-    rotations, and reflections of the structural coordinate frame.
+    also sees an invariant structural-distance encoding computed from
+    LapPE-derived cell coordinates. This keeps the geometric signal invariant
+    to translations, rotations, and reflections of the structural coordinate
+    frame.
 
     Relation-message order is part of the model definition: messages are
     concatenated in the order given by ``self.neighborhoods``. The Hydra config
@@ -243,6 +321,9 @@ class _ETNNLapPELayer(nn.Module):
         Activation name used in message and update MLPs.
     use_batch_norm : bool
         Whether to insert batch normalization in MLP blocks.
+    distance_encoder : _LapPEDistanceEncoder
+        Module that converts sender/receiver structural coordinates into the
+        invariant distance features appended to each relation edge.
     """
 
     def __init__(
@@ -253,10 +334,12 @@ class _ETNNLapPELayer(nn.Module):
         dropout: float,
         activation: str,
         use_batch_norm: bool,
+        distance_encoder: _LapPEDistanceEncoder,
     ) -> None:
         super().__init__()
         self.neighborhoods = list(neighborhoods)
         self.routes = [tuple(route) for route in routes]
+        self.distance_encoder = distance_encoder
         if len(self.neighborhoods) != len(self.routes):
             raise ValueError(
                 "ETNNLapPE expected one route per neighborhood, but found "
@@ -264,13 +347,13 @@ class _ETNNLapPELayer(nn.Module):
                 f"{len(self.routes)} routes."
             )
 
-        # Two scalar edge attributes are supplied to each relation message:
-        # the sparse-neighborhood value and the squared structural distance.
+        # One sparse-neighborhood scalar plus the configured structural
+        # distance encoding are supplied to each relation message.
         self.message_passing = nn.ModuleList(
             [
                 _ETNNMessagePassing(
                     hidden_channels=hidden_channels,
-                    edge_channels=2,
+                    edge_channels=1 + distance_encoder.out_channels,
                     dropout=dropout,
                     activation=activation,
                     use_batch_norm=use_batch_norm,
@@ -356,11 +439,11 @@ class _ETNNLapPELayer(nn.Module):
                     f"but found shape {tuple(edge_attr.shape)}."
                 )
 
-            # Add the invariant structural-coordinate distance. This is the
-            # only place where LapPE coordinates enter the message update. The
-            # message MLP can learn how strongly to weight this scalar, so this
-            # first variant does not introduce a separate distance scale.
-            distance_attr = _squared_coordinate_distances(
+            # Add the invariant structural-coordinate distance encoding. This
+            # is the only place where LapPE coordinates enter the feature
+            # update. RBF mode increases distance-channel capacity while
+            # preserving invariance to coordinate-frame transformations.
+            distance_attr = self.distance_encoder(
                 src_coordinates=coordinates[src_rank],
                 dst_coordinates=coordinates[dst_rank],
                 edge_index=edge_index,
@@ -563,6 +646,129 @@ def _average_coordinates_through_incidence(
     # avoids division by zero without changing nonzero averages.
     weights = weights.clamp_min(torch.finfo(weights.dtype).eps)
     return coordinates / weights
+
+
+class _LapPEDistanceEncoder(nn.Module):
+    """Encode invariant structural distances for ETNN relation messages.
+
+    Parameters
+    ----------
+    distance_encoding : {"scalar", "rbf"}
+        Distance feature type. ``"scalar"`` returns squared Euclidean distance.
+        ``"rbf"`` returns Euclidean distance and fixed RBF features.
+    include_raw_distance : bool
+        Whether RBF mode includes the Euclidean distance channel.
+    num_rbf : int
+        Number of fixed RBF centers in RBF mode.
+    rbf_min : float
+        Minimum Euclidean distance center.
+    rbf_max : float
+        Maximum Euclidean distance center.
+    rbf_gamma : float | None
+        RBF width parameter. If ``None``, it is derived from center spacing.
+    distance_eps : float
+        Numerical epsilon used before square root in RBF mode.
+    """
+
+    def __init__(
+        self,
+        distance_encoding: str,
+        include_raw_distance: bool,
+        num_rbf: int,
+        rbf_min: float,
+        rbf_max: float,
+        rbf_gamma: float | None,
+        distance_eps: float,
+    ) -> None:
+        super().__init__()
+        if distance_encoding not in {"scalar", "rbf"}:
+            raise ValueError(
+                "ETNNLapPE distance_encoding must be 'scalar' or 'rbf', "
+                f"but found {distance_encoding!r}."
+            )
+        if num_rbf < 1:
+            raise ValueError("ETNNLapPE requires num_rbf >= 1.")
+        if rbf_max <= rbf_min:
+            raise ValueError("ETNNLapPE requires rbf_max > rbf_min.")
+        if distance_eps < 0:
+            raise ValueError("ETNNLapPE requires non-negative distance_eps.")
+
+        self.distance_encoding = distance_encoding
+        self.include_raw_distance = include_raw_distance
+        self.num_rbf = num_rbf
+        self.rbf_min = rbf_min
+        self.rbf_max = rbf_max
+        self.distance_eps = distance_eps
+
+        if rbf_gamma is None:
+            if num_rbf == 1:
+                spacing = rbf_max - rbf_min
+            else:
+                spacing = (rbf_max - rbf_min) / (num_rbf - 1)
+            rbf_gamma = 1.0 / (spacing**2)
+        if rbf_gamma <= 0:
+            raise ValueError("ETNNLapPE requires positive rbf_gamma.")
+        self.rbf_gamma = float(rbf_gamma)
+
+        centers = torch.linspace(rbf_min, rbf_max, num_rbf)
+        self.register_buffer("rbf_centers", centers)
+
+    @property
+    def out_channels(self) -> int:
+        """Number of distance channels appended to each relation edge.
+
+        Returns
+        -------
+        int
+            Number of distance-encoding channels.
+        """
+        if self.distance_encoding == "scalar":
+            return 1
+        return self.num_rbf + int(self.include_raw_distance)
+
+    def forward(
+        self,
+        src_coordinates: torch.Tensor,
+        dst_coordinates: torch.Tensor,
+        edge_index: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Encode distances for relation edges.
+
+        Parameters
+        ----------
+        src_coordinates : torch.Tensor
+            Coordinates for sender-rank cells.
+        dst_coordinates : torch.Tensor
+            Coordinates for receiver-rank cells.
+        edge_index : torch.Tensor
+            Relation edges in ``[sender, receiver]`` format.
+        dtype : torch.dtype
+            Floating dtype for the returned distance features.
+
+        Returns
+        -------
+        torch.Tensor
+            Distance feature matrix with shape
+            ``[num_edges, self.out_channels]``.
+        """
+        squared_distance = _squared_coordinate_distances(
+            src_coordinates=src_coordinates,
+            dst_coordinates=dst_coordinates,
+            edge_index=edge_index,
+            dtype=dtype,
+        )
+        if self.distance_encoding == "scalar":
+            return squared_distance
+
+        distance = torch.sqrt(squared_distance.clamp_min(self.distance_eps))
+        centers = self.rbf_centers.to(device=distance.device, dtype=dtype)
+        rbf = torch.exp(
+            -self.rbf_gamma * (distance - centers.unsqueeze(0)).pow(2)
+        )
+        if self.include_raw_distance:
+            return torch.cat([distance, rbf], dim=-1)
+        return rbf
 
 
 def _squared_coordinate_distances(
