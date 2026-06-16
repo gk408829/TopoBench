@@ -131,6 +131,46 @@ class TestETNNPipeline:
             cfg.model.backbone.neighborhoods
         )
 
+    def test_etnn_learned_lappe_config_composes_with_lappe_before_lifting(
+        self,
+    ):
+        """Learned-LapPE ETNN config should refine stored LapPE coordinates."""
+        with hydra.initialize(version_base="1.3", config_path="../../configs"):
+            cfg = hydra.compose(
+                config_name="run.yaml",
+                overrides=[
+                    "model=combinatorial/etnn_learned_lappe",
+                    "dataset=graph/MUTAG",
+                ],
+                return_hydra_config=False,
+            )
+
+        assert cfg.model.model_name == "etnn_learned_lappe"
+        assert (
+            cfg.model.backbone._target_
+            == "topobench.nn.backbones.combinatorial.etnn_learned_lappe.ETNNLearnedLapPE"
+        )
+        assert cfg.model.backbone.coordinate_attr == "LapPE"
+        assert cfg.model.backbone.coordinate_dim == 3
+        assert cfg.model.backbone.alpha_init == 0.05
+        assert cfg.model.backbone.max_alpha == 0.25
+
+        # The learned variant should keep the same separate LapPE coordinate
+        # preprocessing as scalar ETNN-LapPE. The learned part happens inside
+        # the backbone as a bounded refinement of these coordinates.
+        assert "lappe_coordinates" in cfg.transforms
+        lappe = cfg.transforms.lappe_coordinates
+        assert lappe.transform_name == "LapPE"
+        assert lappe.concat_to_x is False
+        assert lappe.max_pe_dim == 3
+
+        assert "graph2combinatorial_lifting" in cfg.transforms
+        lifting = cfg.transforms.graph2combinatorial_lifting
+        assert lifting.transform_name == "GraphTriangleInducedCC"
+        assert list(lifting.neighborhoods) == list(
+            cfg.model.backbone.neighborhoods
+        )
+
     def test_etnn_diffusion_config_composes_with_diffusion_before_lifting(
         self,
     ):

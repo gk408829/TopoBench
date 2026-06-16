@@ -1,0 +1,66 @@
+_target_: topobench.model.TBModel
+
+model_name: etnn_learned_lappe
+model_domain: combinatorial
+
+# Learned structural-coordinate ETNN variant. The preprocessing stack matches
+# ETNN-LapPE: compute rank-0 LapPE with concat_to_x=false, then apply the
+# graph-to-combinatorial lifting. The backbone learns only a bounded refinement
+# of LapPE before constructing higher-rank coordinates by incidence averaging.
+feature_encoder:
+  _target_: topobench.nn.encoders.${model.feature_encoder.encoder_name}
+  encoder_name: AllCellFeatureEncoder
+  in_channels: ${infer_in_channels:${dataset},${oc.select:transforms,null}}
+  out_channels: 32
+  proj_dropout: 0.0
+  selected_dimensions:
+    - 0
+    - 1
+    - 2
+
+backbone:
+  _target_: topobench.nn.backbones.combinatorial.etnn_learned_lappe.ETNNLearnedLapPE
+  in_channels: ${model.feature_encoder.out_channels}
+  hidden_channels: ${model.feature_encoder.out_channels}
+  out_channels: ${model.feature_encoder.out_channels}
+  neighborhoods:
+    - up_adjacency-0
+    - up_adjacency-1
+    - up_adjacency-2
+    - up_incidence-0
+    - down_incidence-1
+    - up_incidence-1
+    - down_incidence-2
+  num_layers: 2
+  dropout: 0.0
+  activation: silu
+  use_batch_norm: false
+  coordinate_attr: LapPE
+  coordinate_dim: 3
+  coord_encoder_hidden_channels: 32
+  coord_encoder_layers: 2
+  coordinate_encoder_neighborhood: up_adjacency-0
+  alpha_init: 0.05
+  max_alpha: 0.25
+  learn_alpha: true
+  center_coordinates: true
+  normalize_coordinates: true
+  coordinate_eps: 1e-8
+
+backbone_wrapper:
+  _target_: topobench.nn.wrappers.combinatorial.TuneWrapper
+  _partial_: true
+  wrapper_name: TuneWrapper
+  out_channels: ${model.feature_encoder.out_channels}
+  num_cell_dimensions: ${infer_topotune_num_cell_dimensions:${oc.select:model.backbone.neighborhoods}}
+
+readout:
+  _target_: topobench.nn.readouts.${model.readout.readout_name}
+  readout_name: PropagateSignalDown
+  num_cell_dimensions: ${infer_topotune_num_cell_dimensions:${oc.select:model.backbone.neighborhoods}}
+  hidden_dim: ${model.feature_encoder.out_channels}
+  out_channels: ${dataset.parameters.num_classes}
+  task_level: ${define_task_level:${dataset.parameters.task_level},${dataset.split_params.learning_setting}}
+  pooling_type: sum
+
+compile: false
